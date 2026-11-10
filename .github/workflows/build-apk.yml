@@ -18,6 +18,7 @@ jobs:
     env:
       ANDROID_HOME: ${{ github.workspace }}/android-sdk
       NDK_HOME: ${{ github.workspace }}/android-sdk/ndk/27.0.12077973
+      ANDROID_NDK_HOME: ${{ github.workspace }}/android-sdk/ndk/27.0.12077973
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,7 +65,20 @@ jobs:
         run: pnpm android:init
 
       - name: Build debug APK
-        run: pnpm tauri android build --debug
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "NDK_HOME=$NDK_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          ls -la "$NDK_HOME" 2>&1 | head -20
+          pnpm tauri android build --debug 2>&1 | tee build.log
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
