@@ -1,80 +1,66 @@
-# HGhub Android APK 云端打包工作流
-# 用法：
-#   1. 把本文件放到你 fork 的仓库的 .github/workflows/build-apk.yml
-#   2. 仓库 Actions 页 → 左侧 "Build Android APK" → Run workflow
-#   3. 跑完后在 Artifacts 里下载 hghub-apk（含 app-debug.apk）
-# 注意：NDK 版本号若报错，用 `sdkmanager --list` 查当前可用版本后替换下面的值。
+# HGhub Android APK 云端打包
+# 本配置对齐作者官方 .github/workflows/release.yml 里的 android job，
+# 只把「需要密钥的 release 签名」换成 debug 免签名（debug 包可直接装手机）。
+# 用法：放到 fork 仓库的 .github/workflows/build-apk.yml，Actions 里 Run workflow。
 
 name: Build Android APK
 
 on:
-  workflow_dispatch:        # 允许手动触发
+  workflow_dispatch:
   push:
     branches: [main]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_HOME: ${{ github.workspace }}/android-sdk
-      NDK_HOME: ${{ github.workspace }}/android-sdk/ndk/27.0.12077973
-      ANDROID_NDK_HOME: ${{ github.workspace }}/android-sdk/ndk/27.0.12077973
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
         with:
           version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
 
-      - name: Setup Rust (with Android targets)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
-
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
-      - name: Install Android SDK + NDK
+      # ubuntu runner 自带 Android SDK；不要自己下载 cmdline-tools（license 交互会卡住）
+      - name: 准备 Android SDK / NDK
         run: |
-          mkdir -p "$ANDROID_HOME/cmdline-tools"
-          curl -fsSL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
-          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
-          # 关键：同一步内必须把 sdkmanager 路径加入当前 shell 的 PATH
-          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses
-          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+          echo "NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          ls "$SDK/ndk"
 
-      - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile || pnpm install
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: android
 
-      - name: Init Android project
-        run: pnpm android:init
+      - run: pnpm install --frozen-lockfile
 
-      - name: Build debug APK
+      - name: 生成 Android 工程
+        run: pnpm tauri android init --ci
+
+      - name: 编译 debug APK（按 ABI 分包，免除签名）
         shell: bash
         run: |
           set -o pipefail
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "NDK_HOME=$NDK_HOME"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          ls -la "$NDK_HOME" 2>&1 | head -20
-          pnpm tauri android build --debug 2>&1 | tee build.log
+          pnpm tauri android build --debug --apk --split-per-abi --target aarch64 armv7 x86_64 2>&1 | tee build.log
 
-      - name: Upload build log
+      - name: 上传编译日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -82,12 +68,10 @@ jobs:
           path: build.log
           if-no-files-found: ignore
 
-      - name: Upload APK
+      - name: 上传 APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: hghub-apk
-          path: |
-            src-tauri/gen/android/**/*.apk
-            src-tauri/gen/android/**/*.aab
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
